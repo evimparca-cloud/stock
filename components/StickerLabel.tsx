@@ -82,7 +82,7 @@ export default function StickerLabel({ order, onClose }: StickerLabelProps) {
                         margin: 0; 
                         padding: 0; 
                         font-family: Arial, sans-serif; 
-                        width: 80mm;
+                        width: 80mm; 
                         max-width: 80mm;
                     }
                     .sticker-container {
@@ -141,13 +141,18 @@ export default function StickerLabel({ order, onClose }: StickerLabelProps) {
         // Create new iframe
         iframe = document.createElement('iframe');
         iframe.id = iframeId;
+
+        // CRITICAL FIX: Make iframe visible but offscreen to ensure browser renders it for printing
         iframe.style.position = 'fixed';
-        iframe.style.right = '0';
-        iframe.style.bottom = '0';
-        iframe.style.width = '0';
-        iframe.style.height = '0';
+        iframe.style.left = '-9999px'; // Move off-screen
+        iframe.style.top = '0';
+        iframe.style.width = '210mm'; // Use A4 to be safe
+        iframe.style.height = '1000px';
         iframe.style.border = '0';
-        iframe.style.visibility = 'hidden'; // Hide from view but keep in DOM
+        iframe.style.opacity = '0'; // Invisible to user
+        iframe.style.pointerEvents = 'none';
+        iframe.style.zIndex = '-1';
+
         document.body.appendChild(iframe);
 
         const content = await getPrintContent();
@@ -160,11 +165,10 @@ export default function StickerLabel({ order, onClose }: StickerLabelProps) {
             doc.close();
 
             // Wait for resources (if any images) then print
-            iframe.contentWindow?.focus();
             setTimeout(() => {
+                iframe.contentWindow?.focus();
                 iframe.contentWindow?.print();
-                // Optional: remove iframe after printing, but keeping it is harmless and allows re-print
-            }, 500);
+            }, 1000);
         }
     };
 
