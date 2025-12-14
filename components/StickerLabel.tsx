@@ -130,46 +130,28 @@ export default function StickerLabel({ order, onClose }: StickerLabelProps) {
     };
 
     const handlePrint = async () => {
-        const iframeId = 'sticker-print-iframe';
-        let iframe = document.getElementById(iframeId) as HTMLIFrameElement;
+        // Fallback to the most reliable method: New Window Popup
+        // This avoids all CSS conflicts and iframe rendering issues
+        const printWindow = window.open('', '_blank', 'width=400,height=600');
 
-        // Clean up existing iframe
-        if (iframe) {
-            document.body.removeChild(iframe);
+        if (!printWindow) {
+            alert('Lütfen açılır pencere (popup) engelleyicisini kapatıp tekrar deneyin.');
+            return;
         }
-
-        // Create new iframe
-        iframe = document.createElement('iframe');
-        iframe.id = iframeId;
-
-        // CRITICAL FIX: Make iframe visible but offscreen to ensure browser renders it for printing
-        iframe.style.position = 'fixed';
-        iframe.style.left = '-9999px'; // Move off-screen
-        iframe.style.top = '0';
-        iframe.style.width = '210mm'; // Use A4 to be safe
-        iframe.style.height = '1000px';
-        iframe.style.border = '0';
-        iframe.style.opacity = '0'; // Invisible to user
-        iframe.style.pointerEvents = 'none';
-        iframe.style.zIndex = '-1';
-
-        document.body.appendChild(iframe);
 
         const content = await getPrintContent();
 
-        // Write content
-        const doc = iframe.contentWindow?.document;
-        if (doc) {
-            doc.open();
-            doc.write(content);
-            doc.close();
+        printWindow.document.open();
+        printWindow.document.write(content);
+        printWindow.document.close();
 
-            // Wait for resources (if any images) then print
-            setTimeout(() => {
-                iframe.contentWindow?.focus();
-                iframe.contentWindow?.print();
-            }, 1000);
-        }
+        // Wait for resources to load
+        printWindow.focus();
+        setTimeout(() => {
+            printWindow.print();
+            // Optional: Close after print dialog is closed (some browsers support this better than others)
+            // printWindow.close(); 
+        }, 800);
     };
 
     // Keep the share logic as is, it works on the preview element
