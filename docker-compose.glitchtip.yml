@@ -1,0 +1,105 @@
+version: "3.8"
+
+# GlitchTip - Self-Hosted Error Tracking
+# Access: https://git.parcaevim.com.tr
+
+services:
+  glitchtip-db:
+    image: postgres:15-alpine
+    container_name: glitchtip-db
+    restart: always
+    environment:
+      POSTGRES_DB: glitchtip
+      POSTGRES_USER: glitchtip
+      POSTGRES_PASSWORD: ${GLITCHTIP_DB_PASSWORD:-GlitchTip_Secure_2024}
+    volumes:
+      - glitchtip-db-data:/var/lib/postgresql/data
+    networks:
+      - stock-backend
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U glitchtip" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  glitchtip-redis:
+    image: redis:7-alpine
+    container_name: glitchtip-redis
+    restart: always
+    networks:
+      - stock-backend
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  glitchtip-web:
+    image: glitchtip/glitchtip
+    container_name: glitchtip-web
+    restart: always
+    depends_on:
+      glitchtip-db:
+        condition: service_healthy
+      glitchtip-redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgres://glitchtip:${GLITCHTIP_DB_PASSWORD:-GlitchTip_Secure_2024}@glitchtip-db:5432/glitchtip
+      REDIS_URL: redis://glitchtip-redis:6379/0
+      SECRET_KEY: ${GLITCHTIP_SECRET_KEY:-change_this_to_a_random_50_char_string_for_security}
+      GLITCHTIP_DOMAIN: https://git.parcaevim.com.tr
+      DEFAULT_FROM_EMAIL: noreply@parcaevim.com.tr
+      ENABLE_OPEN_USER_REGISTRATION: "true"
+      CELERY_WORKER_CONCURRENCY: 2
+      CORS_ALLOWED_ORIGINS: "https://parcaevim.com.tr,https://www.parcaevim.com.tr"
+      CSRF_TRUSTED_ORIGINS: "https://parcaevim.com.tr,https://www.parcaevim.com.tr"
+    networks:
+      - stock-backend
+      - stock-frontend
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/_health/" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  glitchtip-worker:
+    image: glitchtip/glitchtip
+    container_name: glitchtip-worker
+    restart: always
+    command: ./bin/run-celery-with-beat.sh
+    depends_on:
+      glitchtip-db:
+        condition: service_healthy
+      glitchtip-redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://glitchtip:${GLITCHTIP_DB_PASSWORD:-GlitchTip_Secure_2024}@glitchtip-db:5432/glitchtip
+      REDIS_URL: redis://glitchtip-redis:6379/0
+      SECRET_KEY: ${GLITCHTIP_SECRET_KEY:-change_this_to_a_random_50_char_string_for_security}
+    networks:
+      - stock-backend
+
+  glitchtip-migrate:
+    image: glitchtip/glitchtip
+    container_name: glitchtip-migrate
+    depends_on:
+      glitchtip-db:
+        condition: service_healthy
+    command: ./manage.py migrate
+    environment:
+      DATABASE_URL: postgres://glitchtip:${GLITCHTIP_DB_PASSWORD:-GlitchTip_Secure_2024}@glitchtip-db:5432/glitchtip
+      SECRET_KEY: ${GLITCHTIP_SECRET_KEY:-change_this_to_a_random_50_char_string_for_security}
+    networks:
+      - stock-backend
+
+volumes:
+  glitchtip-db-data:
+
+
+networks:
+  stock-backend:
+    external: true
+  stock-frontend:
+    external: true

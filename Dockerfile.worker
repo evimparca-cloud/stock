@@ -1,0 +1,64 @@
+# =============================================================================
+# WORKER DOCKERFILE - Background Job Processing
+# Stock Management System - Cron Jobs & Background Tasks
+# =============================================================================
+
+FROM node:20-alpine AS deps
+
+WORKDIR /app
+
+# Install dependencies needed for Prisma
+RUN apk add --no-cache openssl libc6-compat
+ENV PRISMA_CLI_BINARY_TARGETS=linux-musl-openssl-3.0.x
+
+# Package dosyalarını kopyala
+COPY package.json package-lock.json* ./
+COPY prisma ./prisma/
+
+# Dependencies kurulumu
+RUN npm ci --only=production && npm cache clean --force
+
+# Prisma client oluştur
+RUN npx prisma generate
+
+# -----------------------------------------------------------------------------
+# Runner
+# -----------------------------------------------------------------------------
+FROM node:20-alpine AS runner
+
+WORKDIR /app
+
+# Install dependencies needed for Prisma in runner too
+RUN apk add --no-cache openssl libc6-compat curl dumb-init
+
+# Security: Non-root user için hazırlık
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 worker
+
+# Environment
+ENV NODE_ENV=production
+
+# Dependencies kopyala
+COPY --from=deps /app/node_modules ./node_modules
+COPY --from=deps /app/prisma ./prisma
+COPY --from=deps /app/node_modules/.prisma ./node_modules/.prisma
+
+# Worker script ve konfigürasyonları kopyala
+COPY --chown=worker:nodejs lib ./lib
+COPY --chown=worker:nodejs scripts/worker.js ./worker.js
+
+# Security: Dosya sahipliği
+RUN chown -R worker:nodejs /app
+
+# Security: Non-root user'a geç
+USER worker
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD node -e "process.exit(0)"
+
+# Graceful shutdown için dumb-init kullan
+ENTRYPOINT ["dumb-init", "--"]
+
+# Start worker
+CMD ["node", "worker.js"]

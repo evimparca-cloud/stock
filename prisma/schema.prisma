@@ -1,0 +1,679 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Local Inventory - Ana ürün tablosu
+model Product {
+  id            String           @id @default(cuid())
+  sku           String           @unique // Local SKU
+  name          String
+  description   String?          @db.Text
+  stockQuantity Int              @default(0)
+  price         Decimal          @db.Decimal(10, 2)
+  listPrice     Decimal?         @db.Decimal(10, 2) // Liste fiyatı
+  vatRate       Int?             // KDV oranı (0, 1, 10, 20)
+  brand         String?          // Marka adı
+  category      String?          // Kategori adı
+  gender        String?          // Cinsiyet (Erkek, Kadın, Unisex)
+  images        Json?            // Görsel URL'leri (JSON array)
+  attributes    Json?            // Ürün özellikleri (JSON)
+  stockCode     String?          // Tedarikçi stok kodu
+  location      String?          // Depo/Raf konumu
+  isActive      Boolean          @default(true)
+  requiresReview Boolean         @default(false) // Otomatik oluşturulan ürünler için inceleme gerekiyor mu?
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+  
+  // Relations
+  mappings      ProductMapping[]
+  stockLogs     StockLog[]
+  
+  @@index([sku])
+  @@index([brand])
+  @@index([category])
+  @@map("products")
+}
+
+// Marketplace Configuration - Bağlı platformlar
+model Marketplace {
+  id         String   @id @default(cuid())
+  name       String   // örn: 'Trendyol', 'Hepsiburada', 'Amazon'
+  storeName  String?  // Mağaza adı (örn: 'Ana Mağaza', 'Outlet Mağaza')
+  apiKey     String?
+  apiSecret  String?
+  supplierId String?  // Seller ID / Supplier ID (Trendyol, Hepsiburada vs.)
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  
+  // Relations
+  mappings       ProductMapping[]
+  orders         Order[]
+  webhookLogs    WebhookLog[]
+  returnPackages ReturnPackage[]
+  
+  @@index([name])
+  @@map("marketplaces")
+}
+
+// Product Mapping - Yerel ürün ile pazaryeri ürünlerini eşleştiren kritik tablo
+model ProductMapping {
+  id                String           @id @default(cuid())
+  productId         String
+  marketplaceId     String
+  remoteSku         String           // Pazaryerindeki Stok Kodu/Barkod
+  remoteProductName String?          // Pazaryerindeki ürün adı
+  remoteProductId   String?          // Pazaryerindeki ID
+  syncStock         Boolean          @default(true) // Stok eşitlemesi açık mı?
+  trendyolProductId String?          // TrendyolProduct tablosuna referans
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  
+  // Relations
+  product           Product          @relation(fields: [productId], references: [id], onDelete: Cascade)
+  marketplace       Marketplace      @relation(fields: [marketplaceId], references: [id], onDelete: Cascade)
+  trendyolProduct   TrendyolProduct? @relation(fields: [trendyolProductId], references: [id], onDelete: SetNull)
+  orderItems        OrderItem[]
+  
+  // Bir ürün, bir pazaryerinde sadece bir kez eşleşebilir
+  @@unique([productId, marketplaceId])
+  @@index([remoteSku])
+  @@index([productId])
+  @@index([marketplaceId])
+  @@index([trendyolProductId])
+  @@map("product_mappings")
+}
+
+// Order - Gelen siparişler (Detaylı)
+model Order {
+  id                  String      @id @default(cuid())
+  marketplaceOrderId  String      @unique // Pazaryerindeki sipariş ID
+  marketplaceId       String
+  
+  // Temel Bilgiler
+  totalAmount         Decimal     @db.Decimal(10, 2)
+  grossAmount         Decimal?    @db.Decimal(10, 2) // Brüt tutar
+  totalDiscount       Decimal?    @db.Decimal(10, 2) // Toplam indirim
+  totalTyDiscount     Decimal?    @db.Decimal(10, 2) // Trendyol indirimi
+  totalPrice          Decimal?    @db.Decimal(10, 2) // Toplam fiyat
+  currencyCode        String?     @default("TRY")
+  
+  // Durum
+  status              OrderStatus @default(PENDING)
+  shipmentPackageStatus String?   // Trendyol paket durumu
+  
+  // Müşteri Bilgileri
+  customerInfo        Json?       // Eski format (geriye dönük uyumluluk)
+  customerFirstName   String?
+  customerLastName    String?
+  customerEmail       String?
+  customerId          String?
+  identityNumber      String?     // TC Kimlik No
+  taxNumber           String?     // Vergi No
+  
+  // Adres Bilgileri (JSON)
+  shipmentAddress     Json?       // Teslimat adresi detayları
+  invoiceAddress      Json?       // Fatura adresi detayları
+  
+  // Kargo Bilgileri
+  cargoTrackingNumber String?
+  cargoTrackingLink   String?
+  cargoSenderNumber   String?
+  cargoProviderName   String?
+  cargoDeci           Decimal?    @db.Decimal(10, 2)
+  
+  // Tarih Bilgileri
+  orderDate           DateTime    @default(now())
+  originShipmentDate  DateTime?   // Satıcıya aktarılma tarihi
+  lastModifiedDate    DateTime?   // Son güncelleme tarihi
+  estimatedDeliveryStartDate DateTime?
+  estimatedDeliveryEndDate   DateTime?
+  agreedDeliveryDate  DateTime?   // Termin tarihi
+  agreedDeliveryDateExtendible Boolean? // Ek süre girebilir mi
+  extendedAgreedDeliveryDate DateTime? // Ek süre sonrası yeni termin
+  agreedDeliveryExtensionStartDate DateTime?
+  agreedDeliveryExtensionEndDate DateTime?
+  
+  // Paket Geçmişi ve Durum
+  packageHistories    Json?       // Durum geçmişi [{createdDate, status}]
+  
+  // Özel Durumlar (Boolean)
+  fastDelivery        Boolean?    @default(false)
+  fastDeliveryType    String?     // "FastDelivery", "SameDayShipping"
+  commercial          Boolean?    @default(false) // Kurumsal fatura
+  deliveredByService  Boolean?    @default(false) // Yetkili servis teslimatı
+  micro               Boolean?    @default(false) // Mikro ihracat
+  giftBoxRequested    Boolean?    @default(false) // Hediye paketi
+  threePByTrendyol    Boolean?    @default(false) // 3P by Trendyol
+  containsDangerousProduct Boolean? @default(false) // Tehlikeli ürün
+  isCod               Boolean?    @default(false) // Kapıda ödeme
+  
+  // Mikro İhracat Bilgileri
+  etgbNo              String?     // ETGB numarası
+  etgbDate            DateTime?   // ETGB tarihi
+  hsCode              String?     // HS Code
+  
+  // Diğer
+  deliveryType        String?     @default("normal")
+  deliveryAddressType String?     // "Shipment"
+  timeSlotId          Int?
+  scheduledDeliveryStoreId String?
+  invoiceLink         String?
+  shipmentPackageId   String?     // id alanı (Trendyol)
+  whoPays             Int?        // 1: Satıcı anlaşması
+  createdBy           String?     // "order-creation", "split", "cancel", "transfer"
+  originPackageIds    Json?       // İptal veya bölme sonrası orijinal paket IDs
+  
+  // Sistem
+  createdAt           DateTime    @default(now())
+  updatedAt           DateTime    @updatedAt
+  
+  // Relations
+  marketplace         Marketplace     @relation(fields: [marketplaceId], references: [id])
+  items               OrderItem[]
+  stockLogs           StockLog[]
+  returnPackages      ReturnPackage[]
+  
+  @@index([marketplaceOrderId])
+  @@index([marketplaceId])
+  @@index([status])
+  @@index([customerEmail])
+  @@index([cargoTrackingNumber])
+  @@map("orders")
+}
+
+// OrderItem - Sipariş kalemleri (Detaylı)
+model OrderItem {
+  id               String         @id @default(cuid())
+  orderId          String
+  productMappingId String
+  
+  // Temel Bilgiler
+  quantity         Int
+  price            Decimal        @db.Decimal(10, 2)
+  amount           Decimal?       @db.Decimal(10, 2) // Toplam tutar
+  discount         Decimal?       @db.Decimal(10, 2) // İndirim
+  tyDiscount       Decimal?       @db.Decimal(10, 2) // Trendyol indirimi
+  
+  // Ürün Bilgileri
+  productName      String?
+  productCode      String?        // Trendyol product code
+  productSize      String?
+  productColor     String?
+  productOrigin    String?        // "TR"
+  productCategoryId Int?
+  barcode          String?
+  merchantSku      String?        // Trendyol stockCode = lokasyon bilgisi
+  sku              String?
+  productImageUrl  String?        // Trendyol ürün resmi URL
+  
+  // Fiyat Detayları
+  vatBaseAmount    Decimal?       @db.Decimal(10, 2) // KDV matrahı
+  laborCost        Decimal?       @db.Decimal(10, 2) // İşçilik bedeli
+  commission       Decimal?       @db.Decimal(10, 2) // Komisyon
+  currencyCode     String?        @default("TRY")
+  
+  // Kampanya ve Satıcı
+  salesCampaignId  Int?
+  merchantId       Int?
+  
+  // Durum
+  orderLineItemStatusName String? // "ReturnAccepted", vb.
+  orderLineId      String?        // Trendyol orderLineId
+  
+  // Detaylı Bilgiler (JSON)
+  discountDetails  Json?          // İndirim detayları array
+  fastDeliveryOptions Json?       // Hızlı teslimat seçenekleri
+  
+  // Sistem
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  
+  // Relations
+  order            Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productMapping   ProductMapping @relation(fields: [productMappingId], references: [id])
+  
+  @@index([orderId])
+  @@index([productMappingId])
+  @@index([barcode])
+  @@index([sku])
+  @@map("order_items")
+}
+
+// Enum for Order Status
+enum OrderStatus {
+  PENDING
+  PROCESSING
+  SHIPPED
+  DELIVERED
+  CANCELLED
+  REFUNDED
+}
+
+// Webhook Log - Pazaryerlerinden gelen webhook'ları logla
+model WebhookLog {
+  id            String      @id @default(cuid())
+  marketplaceId String
+  eventType     String      // order.created, order.updated, stock.updated, etc.
+  payload       Json        // Gelen webhook verisi
+  status        WebhookStatus @default(PENDING)
+  processedAt   DateTime?
+  error         String?
+  createdAt     DateTime    @default(now())
+  
+  marketplace   Marketplace @relation(fields: [marketplaceId], references: [id])
+  
+  @@index([marketplaceId])
+  @@index([eventType])
+  @@index([status])
+  @@index([createdAt])
+  @@map("webhook_logs")
+}
+
+// Webhook Status Enum
+enum WebhookStatus {
+  PENDING
+  PROCESSING
+  SUCCESS
+  FAILED
+  IGNORED
+}
+
+// Stock Log - Stok hareketleri geçmişi
+model StockLog {
+  id          String         @id @default(cuid())
+  productId   String
+  orderId     String?        // Sipariş ID (satış veya iptal durumlarında)
+  type        StockLogType   // Hareket tipi
+  quantity    Int            // Miktar (+ veya -)
+  oldStock    Int            // Önceki stok
+  newStock    Int            // Yeni stok
+  reason      String?        // Sebep/Açıklama
+  reference   String?        // Referans (Sipariş ID, İade ID, vs.)
+  createdBy   String?        // İşlemi yapan kullanıcı
+  createdAt   DateTime       @default(now())
+  
+  // Relations
+  product     Product        @relation(fields: [productId], references: [id], onDelete: Cascade)
+  order       Order?         @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  
+  @@index([productId])
+  @@index([orderId])
+  @@index([type])
+  @@index([createdAt])
+  @@map("stock_logs")
+}
+
+// Stock Log Type Enum
+enum StockLogType {
+  ENTRY          // Stok Girişi
+  EXIT           // Stok Çıkışı (Manuel)
+  SALE           // Satış
+  RETURN         // İade
+  CANCEL         // İptal
+  ADJUSTMENT     // Düzeltme
+  DAMAGED        // Hasarlı
+  TRANSFER       // Transfer
+}
+
+// Trendyol Ürün Detayları - Import sırasında çekilen tüm bilgiler
+model TrendyolProduct {
+  id                    String    @id @default(cuid())
+  barcode               String    @unique // Trendyol barkodu
+  productMainId         String?   // Ana ürün kodu
+  title                 String    // Ürün adı
+  description           String?   @db.Text // Ürün açıklaması
+  brandId               Int?      // Marka ID
+  brandName             String?   // Marka adı
+  categoryId            Int?      // Kategori ID
+  categoryName          String?   // Kategori adı
+  stockCode             String?   // Stok kodu
+  stockQuantity         Int       @default(0) // Stok miktarı
+  salePrice             Decimal   @default(0) @db.Decimal(10,2) // Satış fiyatı
+  listPrice             Decimal   @default(0) @db.Decimal(10,2) // Liste fiyatı
+  vatRate               Int       @default(20) // KDV oranı
+  dimensionalWeight     Decimal?  @db.Decimal(8,2) // Desi
+  deliveryDuration      Int?      // Teslimat süresi
+  cargoCompanyId        Int?      // Kargo şirketi ID
+  shipmentAddressId     Int?      // Sevkiyat adresi ID
+  returningAddressId    Int?      // İade adresi ID
+  locationBasedDelivery String?   // Konum bazlı teslimat
+  lotNumber             String?   // Lot numarası
+  approved              Boolean   @default(false) // Onaylanmış mı
+  onSale                Boolean   @default(false) // Satışta mı
+  gender                String?   // Cinsiyet
+  images                Json?     // Ürün resimleri (JSON array)
+  attributes            Json?     // Ürün özellikleri (JSON array)
+  deliveryOption        Json?     // Teslimat seçenekleri (JSON object)
+  
+  // Metadata
+  lastSyncAt            DateTime  @default(now()) // Son senkronizasyon
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  
+  // Relations
+  mappings              ProductMapping[] // Bu Trendyol ürününün eşleştirmeleri
+  
+  @@index([barcode])
+  @@index([productMainId])
+  @@index([stockCode])
+  @@index([lastSyncAt])
+  @@map("trendyol_products")
+}
+
+// NextAuth User Model
+model User {
+  id                  String    @id @default(cuid())
+  name                String?
+  email               String    @unique
+  password            String?
+  role                String    @default("USER") // USER, ADMIN
+  emailVerified       DateTime?
+  image               String?
+  
+  // 2FA Fields
+  twoFactorEnabled    Boolean   @default(false)
+  twoFactorSecret     String?   // TOTP secret key
+  backupCodes         Json?     // Array of hashed backup codes
+  
+  // Telegram 2FA Fields
+  telegramChatId      String?   // Kullanıcının Telegram Chat ID'si
+  telegramEnabled     Boolean   @default(false) // Telegram doğrulama aktif mi
+  preferredAuthMethod String    @default("2fa") // "2fa" veya "telegram"
+  
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  
+  accounts            Account[]
+  sessions            Session[]
+  auditLogs           AuditLog[]  // Kullanıcının audit logları
+  passwordResetTokens PasswordResetToken[] // Şifre sıfırlama token'ları
+  telegramCodes       TelegramCode[] // Telegram doğrulama kodları
+  
+  @@map("users")
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+  
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+  
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// Audit Logging - Güvenlik denetim günlüğü
+model AuditLog {
+  id          String   @id @default(cuid())
+  userId      String?  // Null olabilir (başarısız giriş denemeleri için)
+  action      String   // "LOGIN_SUCCESS", "LOGIN_FAILED", "PASSWORD_CHANGE", "ADMIN_ACTION"
+  resource    String?  // Hangi kaynak etkilendi (örn: "USER", "PRODUCT", "ORDER")
+  resourceId  String?  // Etkilenen kaynağın ID'si
+  details     Json?    // Ek detaylar (JSON format)
+  ipAddress   String   // Kullanıcının IP adresi
+  userAgent   String?  // Browser/Client bilgisi
+  success     Boolean  @default(true)
+  errorCode   String?  // Hata kodu (başarısız işlemler için)
+  timestamp   DateTime @default(now())
+  
+  // Relations
+  user        User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  
+  @@index([userId])
+  @@index([action])
+  @@index([timestamp])
+  @@index([ipAddress])
+  @@map("audit_logs")
+}
+
+// Rate Limiting - IP bazlı istek sınırlama
+model RateLimit {
+  id          String   @id @default(cuid())
+  identifier  String   @unique // IP adresi veya user ID
+  attempts    Int      @default(0)
+  lastAttempt DateTime @default(now())
+  blockedUntil DateTime?
+  
+  @@index([identifier])
+  @@index([lastAttempt])
+  @@map("rate_limits")
+}
+
+// Password Reset Tokens - Şifre sıfırlama token'ları
+model PasswordResetToken {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique // Güvenli random token
+  expires   DateTime // Token süresi (genellikle 1 saat)
+  used      Boolean  @default(false) // Kullanılmış mı?
+  ipAddress String?  // İstek yapan IP adresi
+  userAgent String?  // İstek yapan user agent
+  createdAt DateTime @default(now())
+  
+  // Relations
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@index([token])
+  @@index([userId])
+  @@index([expires])
+  @@index([ipAddress])
+  @@map("password_reset_tokens")
+}
+
+// Telegram 2FA Codes - Telegram doğrulama kodları
+model TelegramCode {
+  id        String   @id @default(cuid())
+  userId    String
+  code      String   // 6 haneli doğrulama kodu
+  expires   DateTime // 5 dakika geçerli
+  used      Boolean  @default(false)
+  createdAt DateTime @default(now())
+  
+  // Relations
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@index([userId])
+  @@index([code])
+  @@index([expires])
+  @@map("telegram_codes")
+}
+
+// Marketplace Configuration - API anahtarları şifreli saklanır
+model MarketplaceConfig {
+  id               String   @id @default(cuid())
+  marketplace      String   @unique // "trendyol", "hepsiburada", "amazon"
+  encryptedApiKey  String?  // AES-256 ile şifrelenmiş API anahtarı
+  encryptedSecret  String?  // AES-256 ile şifrelenmiş secret
+  supplierId       String?  // Seller/Supplier ID
+  isActive         Boolean  @default(true)
+  lastSyncAt       DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  
+  @@index([marketplace])
+  @@index([isActive])
+  @@map("marketplace_configs")
+}
+
+// Stock Movement Locks - Concurrency control için
+model StockLock {
+  id        String   @id @default(cuid())
+  productId String   @unique // Bir ürün için sadece bir lock
+  lockedBy  String   // Process/Transaction ID
+  lockedAt  DateTime @default(now())
+  expiresAt DateTime // 30 saniye sonra otomatik unlock
+  
+  @@index([productId])
+  @@index([expiresAt])
+  @@map("stock_locks")
+}
+
+// Security Events - Güvenlik olayları
+model SecurityEvent {
+  id          String   @id @default(cuid())
+  eventType   String   // "BRUTE_FORCE", "SUSPICIOUS_LOGIN", "API_ABUSE"
+  severity    String   // "LOW", "MEDIUM", "HIGH", "CRITICAL"
+  source      String   // IP adresi veya kaynak
+  userId      String?  // Varsa kullanıcı ID
+  details     Json     // Olay detayları
+  resolved    Boolean  @default(false)
+  resolvedBy  String?  // Çözen kişi
+  resolvedAt  DateTime?
+  createdAt   DateTime @default(now())
+  
+  @@index([eventType])
+  @@index([severity])
+  @@index([source])
+  @@index([createdAt])
+  @@map("security_events")
+}
+
+// İade Paketleri - Trendyol Claims
+model ReturnPackage {
+  id                        String    @id @default(cuid())
+  claimId                   String    @unique // Trendyol claim ID
+  marketplaceId             String
+  orderId                   String?   // İlişkili sipariş ID
+  
+  // Temel Bilgiler
+  orderNumber               String
+  orderDate                 DateTime?
+  claimDate                 DateTime
+  lastModifiedDate          DateTime?
+  
+  // Müşteri Bilgileri
+  customerFirstName         String?
+  customerLastName          String?
+  
+  // Kargo Bilgileri
+  cargoTrackingNumber       String?
+  cargoTrackingLink         String?
+  cargoSenderNumber         String?
+  cargoProviderName         String?
+  orderShipmentPackageId    String?
+  orderOutboundPackageId    String?
+  
+  // Durum
+  status                    ReturnStatus @default(CREATED)
+  
+  // JSON Alanları
+  rejectedPackageInfo       Json?     // Red edilen paket bilgileri
+  replacementPackageInfo    Json?     // Değişim paket bilgileri
+  
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
+  
+  // Relations
+  marketplace               Marketplace @relation(fields: [marketplaceId], references: [id], onDelete: Cascade)
+  order                     Order?      @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  items                     ReturnPackageItem[]
+  
+  @@index([claimId])
+  @@index([orderNumber])
+  @@index([status])
+  @@index([claimDate])
+  @@index([marketplaceId])
+  @@map("return_packages")
+}
+
+// İade Paket Kalemleri
+model ReturnPackageItem {
+  id                        String    @id @default(cuid())
+  returnPackageId           String
+  claimItemId               String    @unique // Trendyol claim item ID
+  orderLineItemId           String?
+  
+  // Ürün Bilgileri
+  productName               String
+  barcode                   String?
+  merchantSku               String?
+  productColor              String?
+  productSize               String?
+  price                     Decimal?
+  vatBaseAmount             Decimal?
+  salesCampaignId           String?
+  productCategory           String?
+  
+  // İade Bilgileri
+  customerClaimReason       Json?     // Müşteri iade nedeni
+  trendyolClaimReason       Json?     // Trendyol iade nedeni
+  status                    ReturnItemStatus @default(CREATED)
+  customerNote              String?
+  note                      String?
+  resolved                  Boolean   @default(false)
+  autoAccepted              Boolean   @default(false)
+  acceptedBySeller          Boolean   @default(false)
+  
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
+  
+  // Relations
+  returnPackage             ReturnPackage @relation(fields: [returnPackageId], references: [id], onDelete: Cascade)
+  
+  @@index([claimItemId])
+  @@index([status])
+  @@index([returnPackageId])
+  @@map("return_package_items")
+}
+
+// İade Durumları
+enum ReturnStatus {
+  CREATED           // İadesi oluşan
+  WAITING_IN_ACTION // Tedarikçiye ulaştı
+  WAITING_FRAUD_CHECK // Fraud kontrolü
+  UNRESOLVED        // İhtilaflı
+  REJECTED          // Reddedilen
+  ACCEPTED          // Kabul edilen
+  CANCELLED         // İptal edilen
+  IN_ANALYSIS       // Analizde
+}
+
+// İade Kalem Durumları
+enum ReturnItemStatus {
+  CREATED           // Oluşturuldu
+  WAITING_IN_ACTION // İşlemde
+  ACCEPTED          // Kabul edildi
+  REJECTED          // Reddedildi
+  CANCELLED         // İptal edildi
+  UNRESOLVED        // İhtilaflı
+  IN_ANALYSIS       // Analizde
+}

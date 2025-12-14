@@ -1,0 +1,286 @@
+# =============================================================================
+# DOCKER COMPOSE - Production Setup
+# Stock Management System - E-Commerce Admin Panel
+# Zero-Trust Security & High Availability
+# =============================================================================
+
+version: '3.9'
+
+services:
+  # ===========================================================================
+  # NGINX - Reverse Proxy & SSL Termination
+  # ===========================================================================
+  nginx:
+    image: nginx:alpine
+    container_name: stock-nginx
+    restart: unless-stopped
+    environment:
+      - TZ=Europe/Istanbul
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
+      - ./certbot/www:/var/www/certbot:ro
+    depends_on:
+      app:
+        condition: service_healthy
+    networks:
+      - frontend
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: [ "CMD", "nginx", "-t" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ===========================================================================
+  # CERTBOT - SSL Certificate Management
+  # ===========================================================================
+  certbot:
+    image: certbot/certbot
+    container_name: stock-certbot
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+    networks:
+      - frontend
+
+  # ===========================================================================
+  # APP - Next.js Application
+  # ===========================================================================
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: stock-app
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      - NODE_ENV=production
+      - TZ=Europe/Istanbul
+      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@db:5432/${DB_NAME}?schema=public
+      - REDIS_URL=redis://redis:6379
+      - NEXTAUTH_URL=${NEXTAUTH_URL}
+      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET}
+      - JWT_SECRET=${JWT_SECRET}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      - TRENDYOL_API_KEY=${TRENDYOL_API_KEY}
+      - TRENDYOL_API_SECRET=${TRENDYOL_API_SECRET}
+      - TRENDYOL_SELLER_ID=${TRENDYOL_SELLER_ID}
+      - HOSTNAME=0.0.0.0
+    expose:
+      - "3000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      frontend:
+        aliases:
+          - stock-management-app
+      backend:
+        aliases:
+          - stock-management-app
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://0.0.0.0:3000/api/system/health" ]
+      interval: 30s
+      timeout: 10s
+      start_period: 40s
+      retries: 3
+
+  # ===========================================================================
+  # DATABASE - PostgreSQL
+  # ===========================================================================
+  db:
+    image: postgres:15-alpine
+    container_name: stock-db
+    restart: unless-stopped
+    stop_grace_period: 60s # DB için daha uzun bekleme
+    environment:
+      - TZ=Europe/Istanbul
+      - POSTGRES_USER=${DB_USER}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_DB=${DB_NAME}
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    command:
+      - "postgres"
+      - "-c"
+      - "autovacuum=on"
+      - "-c"
+      - "autovacuum_vacuum_scale_factor=0.1"
+      - "-c"
+      - "autovacuum_analyze_scale_factor=0.05"
+      - "-c"
+      - "autovacuum_vacuum_cost_delay=10ms"
+      - "-c"
+      - "autovacuum_naptime=30s"
+      - "-c"
+      - "maintenance_work_mem=256MB"
+      - "-c"
+      - "max_connections=200"
+      - "-c"
+      - "shared_buffers=256MB"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - backend
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # For development: expose to local machine
+    ports:
+      - "5433:5432"
+  redis:
+    image: redis:7-alpine
+    container_name: stock-redis
+    restart: unless-stopped
+    stop_grace_period: 10s
+    environment:
+      - TZ=Europe/Istanbul
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    networks:
+      - backend
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # For development: expose to local machine
+    ports:
+      - "6378:6379"
+
+  # ===========================================================================
+  # WORKER - Background Job Processing
+  # ===========================================================================
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: stock-worker
+    restart: unless-stopped
+    stop_grace_period: 60s # Worker için uzun bekleme (işler bitsin)
+    environment:
+      - NODE_ENV=production
+      - TZ=Europe/Istanbul
+      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@db:5432/${DB_NAME}?schema=public
+      - REDIS_URL=redis://redis:6379
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL}
+      - TRENDYOL_API_KEY=${TRENDYOL_API_KEY}
+      - TRENDYOL_API_SECRET=${TRENDYOL_API_SECRET}
+      - TRENDYOL_SELLER_ID=${TRENDYOL_SELLER_ID}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - backend
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+    healthcheck:
+      test: [ "CMD", "node", "-e", "process.exit(0)" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ===========================================================================
+  # BACKUP - Günlük Veritabanı Yedeği
+  # ===========================================================================
+  backup:
+    image: postgres:15-alpine
+    container_name: stock-backup
+    restart: unless-stopped
+    environment:
+      - TZ=Europe/Istanbul
+      - PGHOST=db
+      - PGUSER=${DB_USER}
+      - PGPASSWORD=${DB_PASSWORD}
+      - PGDATABASE=${DB_NAME}
+      - BACKUP_RETENTION_DAYS=7
+    volumes:
+      - ./backups:/backups
+      - ./scripts/backup.sh:/backup.sh:ro
+    entrypoint: [ "/bin/sh", "-c" ]
+    command:
+      - |
+        chmod +x /backup.sh
+        echo "0 3 * * * /backup.sh >> /var/log/backup.log 2>&1" | crontab -
+        crond -f -l 2
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - backend
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+  # ===========================================================================
+  # ADMINER - Veritabanı Yönetimi (Opsiyonel - Dev only)
+  # ===========================================================================
+  # adminer:
+  #   image: adminer
+  #   container_name: stock-adminer
+  #   restart: unless-stopped
+  #   ports:
+  #     - "8080:8080"
+  #   depends_on:
+  #     - db
+  #   networks:
+  #     - backend
+  #   profiles:
+  #     - dev
+
+  # =============================================================================
+  # NETWORKS
+  # =============================================================================
+networks:
+  frontend:
+    driver: bridge
+    name: stock-frontend
+  backend:
+    driver: bridge
+    internal: true # Security: Dış dünyaya kapalı
+    name: stock-backend
+
+# =============================================================================
+# VOLUMES
+# =============================================================================
+volumes:
+  postgres_data:
+    name: stock-postgres-data
+  redis_data:
+    name: stock-redis-data
